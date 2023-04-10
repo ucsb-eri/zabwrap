@@ -1,7 +1,7 @@
 import subprocess
-#todo zabbix reporting
-#todo currently only prints the command, does not actually run it yet. 
+import argparse
 
+#todo zabbix reporting
 #list of current backup types and retentions in zfs-autobackup notation
 backupTypes = {"bks":"370,1d1y", "r2":"650,1h10d,1d1y", "r1":"650,1h10d,1d1y", "sandbox":"250,1h,10d", "scratch":""}
 
@@ -17,12 +17,11 @@ cmd5 = " --keep-target "
 cmd6 = " --exclude-unchanged"
 log = " > /var/log/zab 2>&1"
 
-if __name__ == '__main__':
-    #get a list of all zfs file systems (fs)
+def zabwrap(dry_run):
     fslist = subprocess.run(["zfs", "list", "-Hp", "-o", "name"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     fslist = fslist.stdout
     result = {}
-    #turn the fs list into a dictionary
+    #get a list of zfs fs and turn it into a dictionary
     for line in fslist.split("\n"):
         parts = line.split("\n")
         fs = parts[-1]
@@ -46,5 +45,14 @@ if __name__ == '__main__':
                     backupServers = backupdest.split(',')
                     for servers in backupServers: #generate a command for each backup destination defined with the correct backup retention
                         zab = cmd1+fs+cmd2+cmd3+backupTypes[types]+cmd4+servers+cmd5+backupTypes[types]+cmd6+log
-                        print(zab)
+                        if dry_run:
+                            print(zab)
+                        else:
+                            print("executing "+zab)
                         #subprocess.run([zab], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="ZFS autobackup script")
+    parser.add_argument("--dry_run", action="store_true", help="print the commands to be run")
+    args = parser.parse_args()
+    zabwrap(args.dry_run)
