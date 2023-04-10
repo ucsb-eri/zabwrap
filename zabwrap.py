@@ -54,7 +54,7 @@ def zabwrap(dry_run, orphans):
                     for servers in backupServers: #generate a command for each backup destination defined with the correct backup retention
                         zab = cmd1+fs+cmd2+cmd3+backupTypes[types]+cmd4+servers+cmd5+backupTypes[types]+cmd6+log
                         if dry_run:
-                            print(f'{GREEN}Backup Type: {RESET}{types} {GREEN}command: {RESET}{zab}')
+                            print(f'{GREEN}Backup Type:{RESET}{types} {GREEN}Command:{RESET}{zab}')
                         elif orphans:
                             break
                         else:
