@@ -17,7 +17,13 @@ cmd5 = " --keep-target "
 cmd6 = " --exclude-unchanged"
 log = " > /var/log/zab 2>&1"
 
-def zabwrap(dry_run):
+#define colors for orphans output
+RED = '\033[31m'
+YELLOW = '\033[33m'
+RESET = '\033[0m'
+GREEN = '\033[32m'
+
+def zabwrap(dry_run, orphans):
     fslist = subprocess.run(["zfs", "list", "-Hp", "-o", "name"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     fslist = fslist.stdout
     result = {}
@@ -37,7 +43,9 @@ def zabwrap(dry_run):
             backupfstype = backupfstype.stdout
             for types in backupTypes:
                 if "scratch" in backupfstype: #check if its scratch and if it is ignore it
-                    break
+                    if orphans:
+                        print(f'{RED}filesystem backup type is scratch: {RESET}'+fs)
+                        break
                 elif types in backupfstype: #check what server(s) this fs should be backed up to
                     backupdest = subprocess.run(["zfs", "get", "-s", "local", "-H", "-o", "value", "zab:server", fs], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                     backupdest = backupdest.stdout
@@ -46,13 +54,18 @@ def zabwrap(dry_run):
                     for servers in backupServers: #generate a command for each backup destination defined with the correct backup retention
                         zab = cmd1+fs+cmd2+cmd3+backupTypes[types]+cmd4+servers+cmd5+backupTypes[types]+cmd6+log
                         if dry_run:
-                            print(zab)
+                            print(f'{GREEN}command to execute: {RESET}'+zab)
+                        elif orphans:
+                            break
                         else:
-                            print("executing "+zab)
-                        #subprocess.run([zab], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                            print(zab)
+                            #subprocess.run([zab], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        elif orphans:
+            print(f'{YELLOW}filesystem autobackup:zab not defined: {RESET}'+fs)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="ZFS autobackup script")
-    parser.add_argument("--dry_run", action="store_true", help="print the commands to be run")
+    parser.add_argument("--dry-run", "-d", action="store_true", help="print the commands to be run")
+    parser.add_argument("--orphans", "-o", action="store_true", help="print a list of filesystems set to not backup")
     args = parser.parse_args()
-    zabwrap(args.dry_run)
+    zabwrap(args.dry_run, args.orphans)
