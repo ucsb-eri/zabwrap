@@ -44,7 +44,7 @@ def zabwrap(dry_run, orphans):
             for types in backupTypes:
                 if "scratch" in backupfstype: #check if its scratch and if it is ignore it
                     if orphans:
-                        print(f'{RED}filesystem backup type is scratch: {RESET}'+fs)
+                        print(f'{YELLOW}filesystem backup type is scratch: {RESET}'+fs)
                         break
                 elif types in backupfstype: #check what server(s) this fs should be backed up to
                     backupdest = subprocess.run(["zfs", "get", "-s", "local", "-H", "-o", "value", "zab:server", fs], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -54,14 +54,14 @@ def zabwrap(dry_run, orphans):
                     for servers in backupServers: #generate a command for each backup destination defined with the correct backup retention
                         zab = cmd1+fs+cmd2+cmd3+backupTypes[types]+cmd4+servers+cmd5+backupTypes[types]+cmd6+log
                         if dry_run:
-                            print(f'{GREEN}command to execute: {RESET}'+zab)
+                            print(f'{GREEN}Backup Type: {RESET}{types} {GREEN}command: {RESET}{zab}')
                         elif orphans:
                             break
                         else:
                             print(zab)
                             #subprocess.run([zab], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         elif orphans:
-            print(f'{YELLOW}filesystem autobackup:zab not defined: {RESET}'+fs)
+            print(f'{RED}filesystem autobackup:zab not defined: {RESET}'+fs)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="ZFS autobackup script")
