@@ -1,5 +1,7 @@
 import subprocess
 #todo zabbix reporting
+#todo currently only prints the command, does not actually run it yet. 
+
 #list of current backup types and retentions in zfs-autobackup notation
 backupTypes = {"bks":"370,1d1y", "r2":"650,1h10d,1d1y", "r1":"650,1h10d,1d1y", "sandbox":"250,1h,10d", "scratch":""}
 
@@ -16,10 +18,11 @@ cmd6 = " --exclude-unchanged"
 log = " > /var/log/zab 2>&1"
 
 if __name__ == '__main__':
+    #get a list of all zfs file systems (fs)
     fslist = subprocess.run(["zfs", "list", "-Hp", "-o", "name"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     fslist = fslist.stdout
     result = {}
-    #get a list of zfs fs and turn it into a dictionary
+    #turn the fs list into a dictionary
     for line in fslist.split("\n"):
         parts = line.split("\n")
         fs = parts[-1]
