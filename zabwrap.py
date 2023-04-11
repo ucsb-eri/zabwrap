@@ -63,7 +63,7 @@ def zabwrap(dry_run, orphans, limit):
                         elif orphans:
                             break
                         else:
-                            run = subprocess.run(zab.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                            run = subprocess.run(zab.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
                             print(run.stdout)
                             print(run.stderr)
                             #print(zab)
