@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import subprocess
 import argparse
 
@@ -27,7 +28,7 @@ def zabwrap(dry_run, orphans, limit):
     if limit:
         result = limit
     else:
-        fslist = subprocess.run(["zfs", "list", "-Hp", "-o", "name"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        fslist = subprocess.run(["zfs", "list", "-Hp", "-o", "name"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
         fslist = fslist.stdout
         result = {}
         #get a list of zfs fs and turn it into a dictionary
@@ -40,10 +41,10 @@ def zabwrap(dry_run, orphans, limit):
         result = {k: v for k, v in result.items() if k != ''}
 
     for fs in result: #local flag ignores all inherited properties, need to hash out how we want this to behave and either keep or remove the flag. local requires manually settings on all fs
-        backupsfs = subprocess.run(["zfs", "get", "-s", "local", "-H", "-o", "value", "autobackup:zab", fs], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        backupsfs = subprocess.run(["zfs", "get", "-s", "local", "-H", "-o", "value", "autobackup:zab", fs], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
         backupsfs = backupsfs.stdout
         if "true" in backupsfs: #is this part of the zab backup group? if yes check what type it is
-            backupfstype = subprocess.run(["zfs", "get", "-H", "-o", "value", "zab:backuptype", fs], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            backupfstype = subprocess.run(["zfs", "get", "-H", "-o", "value", "zab:backuptype", fs], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
             backupfstype = backupfstype.stdout
             for types in backupTypes:
                 if "scratch" in backupfstype: #check if its scratch and if it is ignore it
@@ -51,7 +52,7 @@ def zabwrap(dry_run, orphans, limit):
                         print(f'{YELLOW}filesystem backup type is scratch: {RESET}'+fs)
                         break
                 elif types in backupfstype: #check what server(s) this fs should be backed up to
-                    backupdest = subprocess.run(["zfs", "get", "-H", "-o", "value", "zab:server", fs], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    backupdest = subprocess.run(["zfs", "get", "-H", "-o", "value", "zab:server", fs], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
                     backupdest = backupdest.stdout
                     backupdest = backupdest.strip('[ ]\n')
                     backupServers = backupdest.split(',')
@@ -65,7 +66,7 @@ def zabwrap(dry_run, orphans, limit):
                             print(zab)
                             #subprocess.run([zab], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         elif orphans:
-            orphanfs = subprocess.run(["zfs", "get", "-H", "-o", "value", "autobackup:zab", fs], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            orphanfs = subprocess.run(["zfs", "get", "-H", "-o", "value", "autobackup:zab", fs], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
             orphanfs = orphanfs.stdout
             if not "true" in orphanfs:
                 print(f'{RED}filesystem autobackup:zab not defined: {RESET}'+fs)
