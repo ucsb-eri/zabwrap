@@ -23,18 +23,21 @@ YELLOW = '\033[33m'
 RESET = '\033[0m'
 GREEN = '\033[32m'
 
-def zabwrap(dry_run, orphans):
-    fslist = subprocess.run(["zfs", "list", "-Hp", "-o", "name"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    fslist = fslist.stdout
-    result = {}
-    #get a list of zfs fs and turn it into a dictionary
-    for line in fslist.split("\n"):
-        parts = line.split("\n")
-        fs = parts[-1]
-        result[fs] = {}
-        for i in range(len(parts)-2, -1, -1):
-            result = {parts[i]: result}
-    result = {k: v for k, v in result.items() if k != ''} #remove empty key pair value
+def zabwrap(dry_run, orphans, limit):
+    if limit:
+        result = limit
+    else:
+        fslist = subprocess.run(["zfs", "list", "-Hp", "-o", "name"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        fslist = fslist.stdout
+        result = {}
+        #get a list of zfs fs and turn it into a dictionary
+        for line in fslist.split("\n"):
+            parts = line.split("\n")
+            fs = parts[-1]
+            result[fs] = {}
+            for i in range(len(parts)-2, -1, -1):
+                result = {parts[i]: result}
+        result = {k: v for k, v in result.items() if k != ''}
 
     for fs in result: #local flag ignores all inherited properties, need to hash out how we want this to behave and either keep or remove the flag. local requires manually settings on all fs
         backupsfs = subprocess.run(["zfs", "get", "-s", "local", "-H", "-o", "value", "autobackup:zab", fs], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -71,5 +74,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="ZFS autobackup script")
     parser.add_argument("--dry-run", "-d", action="store_true", help="print the commands to be run")
     parser.add_argument("--orphans", "-o", action="store_true", help="print a list of filesystems set to not backup")
+    parser.add_argument("--limit", "-l", nargs="+", help="supply a list of filesystems to run zfs-autobackup on, must be in raid/fs format")
     args = parser.parse_args()
-    zabwrap(args.dry_run, args.orphans)
+    zabwrap(args.dry_run, args.orphans, args.limit)
