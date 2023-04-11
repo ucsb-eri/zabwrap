@@ -4,13 +4,13 @@ import argparse
 
 #todo zabbix reporting
 #list of current backup types and retentions in zfs-autobackup notation
-backupTypes = {"bks":"370,1d1y", "r2":"650,1h10d,1d1y", "r1":"650,1h10d,1d1y", "sandbox":"250,1h,10d", "scratch":""}
+backupTypes = {"bks":"370,1d1y", "r2":"650,1h10d,1d1y", "r1":"650,1h10d,1d1y", "sandbox":"250,1h10d", "scratch":""}
 
 #backup settings
 
 #backup command:
 #need to add a flag for verbose / logging options
-cmd1 = "/usr/local/bin/zfs-autobackup zab "
+cmd1 = "/usr/local/bin/zfs-autobackup "
 cmd2 = " --verbose"
 cmd3 = " --keep-source "
 cmd4 = " --ssh-target "
@@ -41,7 +41,9 @@ def zabwrap(dry_run, orphans, limit):
         result = {k: v for k, v in result.items() if k != ''}
 
     for fs in result: #local flag ignores all inherited properties, need to hash out how we want this to behave and either keep or remove the flag. local requires manually settings on all fs
-        backupsfs = subprocess.run(["zfs", "get", "-s", "local", "-H", "-o", "value", "autobackup:zab", fs], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        zabprop = "autobackup:"+fs.replace("/", "-")
+        zabselect = fs.replace("/", "-")
+        backupsfs = subprocess.run(["zfs", "get", "-s", "local", "-H", "-o", "value", zabprop, fs], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
         backupsfs = backupsfs.stdout
         if "true" in backupsfs: #is this part of the zab backup group? if yes check what type it is
             backupfstype = subprocess.run(["zfs", "get", "-H", "-o", "value", "zab:backuptype", fs], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
@@ -57,18 +59,18 @@ def zabwrap(dry_run, orphans, limit):
                     backupdest = backupdest.strip('[ ]\n')
                     backupServers = backupdest.split(',')
                     for servers in backupServers: #generate a command for each backup destination defined with the correct backup retention
-                        zab = cmd1+fs+cmd2+cmd3+backupTypes[types]+cmd4+servers+cmd5+backupTypes[types]+cmd6+log
+                        zab = cmd1+zabselect+" "+fs+cmd2+cmd3+backupTypes[types]+cmd4+servers+cmd5+backupTypes[types]+cmd6 #+log
                         if dry_run:
                             print(f'{GREEN}Backup Type:{RESET}{types} {GREEN}Command:{RESET}{zab}')
                         elif orphans:
                             break
                         else:
+                            print(zab)
                             run = subprocess.run(zab.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
                             print(run.stdout)
                             print(run.stderr)
-                            #print(zab)
         elif orphans:
-            orphanfs = subprocess.run(["zfs", "get", "-H", "-o", "value", "autobackup:zab", fs], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+            orphanfs = subprocess.run(["zfs", "get", "-H", "-o", "value", zabprop, fs], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
             orphanfs = orphanfs.stdout
             if not "true" in orphanfs:
                 print(f'{RED}filesystem autobackup:zab not defined: {RESET}'+fs)
