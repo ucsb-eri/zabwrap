@@ -63,8 +63,10 @@ def zabwrap(dry_run, orphans, limit):
                         elif orphans:
                             break
                         else:
-                            print(zab)
-                            #subprocess.run([zab], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                            run = subprocess.run(zab.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                            print(run.stdout)
+                            print(run.stderr)
+                            #print(zab)
         elif orphans:
             orphanfs = subprocess.run(["zfs", "get", "-H", "-o", "value", "autobackup:zab", fs], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
             orphanfs = orphanfs.stdout
