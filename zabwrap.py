@@ -73,10 +73,10 @@ def zabwrap(dry_run, orphans, limit):
             for j in result:
                 j = "autobackup:"+j.replace("/", "-")
                 orphanfs = subprocess.run(["zfs", "get", "-H", "-o", "value", j, fs], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
-                #print(orphanfs)
                 orphanfs = orphanfs.stdout
                 if "true" in orphanfs:
                     zfsautobackup="true"
+                    break
                 else:
                     zfsautobackup="false"
             if "false" in zfsautobackup:
