@@ -50,9 +50,7 @@ def zabwrap(dry_run, orphans, limit):
             backupfstype = backupfstype.stdout
             for types in backupTypes:
                 if "scratch" in backupfstype: #check if its scratch and if it is ignore it
-                    if orphans:
-                        print(f'{YELLOW}filesystem backup type is scratch: {RESET}'+fs)
-                        break
+                    break
                 elif types in backupfstype: #check what server(s) this fs should be backed up to
                     backupdest = subprocess.run(["zfs", "get", "-H", "-o", "value", "zab:server", fs], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
                     backupdest = backupdest.stdout
@@ -69,11 +67,26 @@ def zabwrap(dry_run, orphans, limit):
                             run = subprocess.run(zab.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
                             print(run.stdout)
                             print(run.stderr)
-        elif orphans:
-            orphanfs = subprocess.run(["zfs", "get", "-H", "-o", "value", zabprop, fs], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
-            orphanfs = orphanfs.stdout
-            if not "true" in orphanfs:
-                print(f'{RED}filesystem autobackup:zab not defined: {RESET}'+fs)
+        if orphans:
+            for j in result:
+                j = "autobackup:"+j.replace("/", "-")
+                orphanfs = subprocess.run(["zfs", "get", "-H", "-o", "value", j, fs], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+                #print(orphanfs)
+                orphanfs = orphanfs.stdout
+                if "true" in orphanfs:
+                    zfsautobackup="true"
+                else:
+                    zfsautobackup="false"
+            if "false" in zfsautobackup:
+                backupfstype = subprocess.run(["zfs", "get", "-H", "-o", "value", "zab:backuptype", fs], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+                backupfstype = backupfstype.stdout
+                for types in backupTypes:
+                    if "scratch" in backupfstype: #check if its scratch and if it is ignore it
+                        print(f'{YELLOW}filesystem backup type is scratch: {RESET}'+fs)
+                        break
+                else:
+                    print(f'{RED}filesystem autobackup:zab not defined: {fs} {RESET}')
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="ZFS autobackup script")
