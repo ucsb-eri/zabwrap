@@ -2,7 +2,9 @@
 import subprocess
 import argparse
 
+#todo make the orphans check its own def
 #todo zabbix reporting
+
 #list of current backup types and retentions in zfs-autobackup notation
 backupTypes = {"bks":"370,1d1y", "r2":"650,1h10d,1d1y", "r1":"650,1h10d,1d1y", "sandbox":"250,1h10d", "scratch":""}
 
