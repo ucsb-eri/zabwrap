@@ -56,6 +56,24 @@ def run_backup(dry_run, fs, zabselect, server, retention):
         retention,
         "--exclude-unchanged",
     ]
+    if dry_run:
+        print(f"{GREEN}Backup Type:{RESET}{zabselect} {GREEN}Command:{RESET}{' '.join(command_parts)}")
+    else:
+        run = run_subprocess(command_parts)
+        print(run.stdout)
+        print(run.stderr)
+
+
+def run_sandbox_backup(dry_run, fs, zabselect, retention):
+    command_parts = [
+        "/usr/local/bin/zfs-autobackup",
+        zabselect,
+        fs,
+        "--verbose",
+        "--keep-source",
+        retention,
+        "--exclude-unchanged",
+    ]
 
     if dry_run:
         print(f"{GREEN}Backup Type:{RESET}{zabselect} {GREEN}Command:{RESET}{' '.join(command_parts)}")
@@ -118,10 +136,13 @@ def zabwrap(dry_run, orphans, limit):
                         backupServers = backupdest.split(",")
 
                         for server in backupServers:  # generate a command for each backup destination defined with the correct backup retention
-                            run_backup(dry_run, fs, zabselect, server, BACKUP_TYPES[types])
+                            if types == "sandbox":
+                                run_sandbox_backup(dry_run, fs, zabselect, BACKUP_TYPES[types])
+                            else:    
+                                run_backup(dry_run, fs, zabselect, server, BACKUP_TYPES[types])
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ZFS autobackup script")
+    parser = argparse.ArgumentParser(description="ZFS autobackup wrapper")
     parser.add_argument("--dry-run", "-d", action="store_true", help="print the commands to be run")
     parser.add_argument("--orphans", "-o", action="store_true", help="print a list of filesystems set to not backup")
     parser.add_argument("--limit", "-l", nargs="+", help="supply a list of filesystems to run zfs-autobackup on, must be in raid/fs format")
