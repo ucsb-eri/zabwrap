@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import subprocess
 import argparse
+import re
 
 # Backup settings
 BACKUP_TYPES = {
@@ -16,6 +17,9 @@ RED = "\033[31m"
 YELLOW = "\033[33m"
 RESET = "\033[0m"
 GREEN = "\033[32m"
+
+#regex
+pattern = r'[A-Z]'
 
 def run_subprocess(cmd, *args, **kwargs):
     return subprocess.run(
@@ -89,6 +93,7 @@ def check_orphans(fs, result):
 
     for j in result:
         j = "autobackup:" + j.replace("/", "-")
+        j = re.sub(pattern, to_lowercase, zabprop)
         orphanfs = run_subprocess(["zfs", "get", "-H", "-o", "value", j, fs])
         orphanfs = orphanfs.stdout
 
@@ -114,6 +119,7 @@ def zabwrap(dry_run, orphans, limit):
     else:
         for fs in result:
             zabprop = "autobackup:" + fs.replace("/", "-")
+            zabprop = re.sub(pattern, to_lowercase, zabprop)
             zabselect = fs.replace("/", "-")
             backupsfs = run_subprocess(["zfs", "get", "-s", "local", "-H", "-o", "value", zabprop, fs])
             backupsfs = backupsfs.stdout
