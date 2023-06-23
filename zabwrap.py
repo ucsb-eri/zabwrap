@@ -121,6 +121,7 @@ def zabwrap(dry_run, orphans, limit):
             zabprop = "autobackup:" + fs.replace("/", "-")
             zabprop = re.sub(pattern, to_lowercase, zabprop)
             zabselect = fs.replace("/", "-")
+            zabselect = re.sub(pattern, to_lowercase, zabselect)
             backupsfs = run_subprocess(["zfs", "get", "-s", "local", "-H", "-o", "value", zabprop, fs])
             backupsfs = backupsfs.stdout
 
