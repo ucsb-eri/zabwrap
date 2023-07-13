@@ -18,8 +18,10 @@ YELLOW = "\033[33m"
 RESET = "\033[0m"
 GREEN = "\033[32m"
 
-#regex
 pattern = r'[A-Z]'
+
+def to_lowercase(match):
+    return match.group(0).lower()
 
 def run_subprocess(cmd, *args, **kwargs):
     return subprocess.run(
@@ -46,11 +48,11 @@ def get_zfs_fs_list():
 
     return {k: v for k, v in result.items() if k != ""}
 
-def run_backup(dry_run, fs, zabselect, server, retention):
+def run_backup(dry_run, fs, zabselect, server, retention, path):
     command_parts = [
         "/usr/local/bin/zfs-autobackup",
         zabselect,
-        fs,
+        path,
         "--verbose",
         "--keep-source",
         retention,
@@ -61,7 +63,7 @@ def run_backup(dry_run, fs, zabselect, server, retention):
         "--exclude-unchanged",
     ]
     if dry_run:
-        print(f"{GREEN}Backup Type:{RESET}{zabselect} {GREEN}Command:{RESET}{' '.join(command_parts)}")
+        print(f"{GREEN}Backup Retention:{RESET}{retention} {GREEN}Command:{RESET}{' '.join(command_parts)}")
     else:
         run = run_subprocess(command_parts)
         print(run.stdout)
@@ -93,7 +95,7 @@ def check_orphans(fs, result):
 
     for j in result:
         j = "autobackup:" + j.replace("/", "-")
-        j = re.sub(pattern, to_lowercase, zabprop)
+	
         orphanfs = run_subprocess(["zfs", "get", "-H", "-o", "value", j, fs])
         orphanfs = orphanfs.stdout
 
@@ -122,7 +124,7 @@ def zabwrap(dry_run, orphans, limit):
             zabprop = re.sub(pattern, to_lowercase, zabprop)
             zabselect = fs.replace("/", "-")
             zabselect = re.sub(pattern, to_lowercase, zabselect)
-            backupsfs = run_subprocess(["zfs", "get", "-s", "local", "-H", "-o", "value", zabprop, fs])
+            backupsfs = run_subprocess(["zfs", "get", "-s", "local", "-H", "-o", "value", zabprop, fs]) 
             backupsfs = backupsfs.stdout
 
             if "true" in backupsfs:  # is this part of the zab backup group? if yes check what type it is
@@ -134,19 +136,20 @@ def zabwrap(dry_run, orphans, limit):
                         break
                     elif types in backupfstype:  # check what server(s) this fs should be backed up to
                         backupdest = subprocess.run(
-                            ["zfs", "get", "-H", "-o", "value", "zab:server", fs],
+                            ["zfs", "get", "-H", "-o", "value", "zab:server", fs], 
                             stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE,
                             universal_newlines=True,
                         )
                         backupdest = backupdest.stdout.strip("[ ]\n")
                         backupServers = backupdest.split(",")
-
                         for server in backupServers:  # generate a command for each backup destination defined with the correct backup retention
+                            server, path = server.split(':')
+                            path = path.replace("-", "/")
                             if types == "sandbox":
-                                run_sandbox_backup(dry_run, fs, zabselect, BACKUP_TYPES[types])
+                                run_sandbox_backup(dry_run, fs, zabselect, BACKUP_TYPES[types], path) 
                             else:    
-                                run_backup(dry_run, fs, zabselect, server, BACKUP_TYPES[types])
+                                run_backup(dry_run, fs, zabselect, server, BACKUP_TYPES[types], path)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ZFS autobackup wrapper")
