@@ -61,6 +61,7 @@ def run_backup(dry_run, fs, zabselect, server, retention, path):
         "--keep-target",
         retention,
         "--exclude-unchanged",
+	"1",
     ]
     if dry_run:
         print(f"{GREEN}Backup Retention:{RESET}{retention} {GREEN}Command:{RESET}{' '.join(command_parts)}")
@@ -79,6 +80,7 @@ def run_sandbox_backup(dry_run, fs, zabselect, retention):
         "--keep-source",
         retention,
         "--exclude-unchanged",
+	"1",
     ]
 
     if dry_run:
@@ -146,7 +148,7 @@ def zabwrap(dry_run, orphans, limit):
                         for server in backupServers:  # generate a command for each backup destination defined with the correct backup retention
                             server, path = server.split(':')
                             path = path.replace("-", "/")
-                            if types == "sandbox":
+                            if "sandbox" in types:
                                 run_sandbox_backup(dry_run, fs, zabselect, BACKUP_TYPES[types], path) 
                             else:    
                                 run_backup(dry_run, fs, zabselect, server, BACKUP_TYPES[types], path)
