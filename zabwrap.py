@@ -71,7 +71,7 @@ def run_backup(dry_run, fs, zabselect, server, retention, path):
         print(run.stderr)
 
 
-def run_sandbox_backup(dry_run, fs, zabselect, retention):
+def run_sandbox_backup(dry_run, fs, zabselect, retention, server, path):
     command_parts = [
         "/usr/local/bin/zfs-autobackup",
         zabselect,
