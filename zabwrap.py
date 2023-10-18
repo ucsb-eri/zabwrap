@@ -61,6 +61,7 @@ def run_backup(dry_run, fs, zabselect, server, retention, path):
         "--keep-target",
         retention,
         "--exclude-unchanged",
+	"1",
     ]
     if dry_run:
         print(f"{GREEN}Backup Retention:{RESET}{retention} {GREEN}Command:{RESET}{' '.join(command_parts)}")
