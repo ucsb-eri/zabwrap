@@ -82,8 +82,11 @@ def run_backup(dry_run, fs, zabselect, server, retention, path, include_snapshot
         server,
         "--keep-target",
         retention,
-        "--exclude-unchanged=1024",
-        "--strip-path=1"
+        "--exclude-unchanged",
+        "1024",
+        "--strip-path",
+        "1",
+        "--other-snapshots",
     ]
     if include_snapshots:
         command_parts.append("--other-snapshots")
@@ -103,7 +106,8 @@ def run_sandbox_backup(dry_run, fs, zabselect, retention):
         "--verbose",
         "--keep-source",
         retention,
-        "--exclude-unchanged=1024",
+        "--exclude-unchanged",
+        "1024",
     ]
 
     if dry_run:
