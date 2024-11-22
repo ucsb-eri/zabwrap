@@ -13,6 +13,8 @@ logfile_path = "/var/log/zfs_backup.log"
 
 # Backup settings
 BACKUP_TYPES = {
+
+    "one": "175,1h5d,1w1y",
     "r2": "652,1h10d,1d1y",
     "r1": "651,1h10d,1d1y",
     "r0": "0",
@@ -113,11 +115,13 @@ def run_backup(dry_run, fs, zabselect, server, retention, path, include_snapshot
         server,
         "--keep-target",
         retention,
-        "--exclude-unchanged",
-        "1024",
+        "--strip-path",
+        "1",
+        "--other-snapshots",
         "--strip-path",
         "1"
         "--destroy-incompatible"
+
     ]
     if include_snapshots:
         command_parts.append("--other-snapshots")
@@ -140,8 +144,6 @@ def run_sandbox_backup(dry_run, fs, zabselect, retention):
         "--verbose",
         "--keep-source",
         retention,
-        "--exclude-unchanged",
-        "1024",
     ]
 
     if dry_run:
