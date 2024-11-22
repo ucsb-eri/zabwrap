@@ -119,8 +119,8 @@ def run_backup(dry_run, fs, zabselect, server, retention, path, include_snapshot
         "1",
         "--other-snapshots",
         "--strip-path",
-        "1"
-        "--destroy-incompatible"
+        "1",
+        "--destroy-incompatible",
 
     ]
     if include_snapshots:
