@@ -10,9 +10,12 @@ lockfile_path = "/tmp/zabwrap.locl"
 # Backup settings
 # custom retention periods can be set with "sandbox-<unique>": "###,#h#d,#d#y"
 BACKUP_TYPES = {
+    "one": "175,1h5d,1w1y",
     "r2": "650,1h10d,1d1y",
     "r1": "650,1h10d,1d1y",
+    "r0": "0",
     "sandbox": "250,1h10d",
+    "raid-sandbox": "10,1h10d",
     "scratch": "",
 }
 
@@ -82,8 +85,6 @@ def run_backup(dry_run, fs, zabselect, server, retention, path, include_snapshot
         server,
         "--keep-target",
         retention,
-        "--exclude-unchanged",
-        "1024",
         "--strip-path",
         "1",
         "--other-snapshots",
@@ -106,8 +107,6 @@ def run_sandbox_backup(dry_run, fs, zabselect, retention):
         "--verbose",
         "--keep-source",
         retention,
-        "--exclude-unchanged",
-        "1024",
     ]
 
     if dry_run:
