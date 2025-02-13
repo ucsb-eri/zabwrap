@@ -5,6 +5,7 @@ import re
 import os
 import sys
 import logging
+import socket
 import datetime
 
 # Lockfile and logging settings
