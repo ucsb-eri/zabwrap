@@ -2,53 +2,98 @@
 import subprocess
 import argparse
 import re
+import os
+import sys
+import logging
+import datetime
+
+# Lockfile and logging settings
+lockfile_path = "/tmp/zfs_autobackup.lock"
+logfile_path = "/var/log/zfs_backup.log"
 
 # Backup settings
 BACKUP_TYPES = {
-    "bks": "370,1d1y",
-    "r2": "650,1h10d,1d1y",
-    "r1": "650,1h10d,1d1y",
+    "one": "175,1h5d,1w1y",
+    "r2": "652,1h10d,1d1y",
+    "r1": "651,1h10d,1d1y",
+    "r0": "0",
     "sandbox": "250,1h10d",
+    "raid-sandbox": "10,1h10d",
     "scratch": "",
 }
+
+# Zabbix settings
+ZABBIX_SERVER = "zabbix.grit.ucsb.edu"
+PSK_IDENTITY = "GEOG Linux Servers"
+PSK_FILE = "/etc/zabbix/zabbix_agent.psk"
 
 # ANSI color codes
 RED = "\033[31m"
 YELLOW = "\033[33m"
-RESET = "\033[0m"
 GREEN = "\033[32m"
+RESET = "\033[0m"
 
-pattern = r'[A-Z]'
+# Configure logging
+logging.basicConfig(filename=logfile_path, level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
-def to_lowercase(match):
-    return match.group(0).lower()
+def run_subprocess(cmd, use_sudo=False, timeout=300):
+    if use_sudo:
+        cmd.insert(0, 'sudo')
+    try:
+        return subprocess.run(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True, timeout=timeout
+        )
+    except subprocess.TimeoutExpired:
+        logging.error(f"Command timed out: {' '.join(cmd)}")
+        print(f"{RED}Timeout expired while running: {' '.join(cmd)}{RESET}")
+        return None
 
-def run_subprocess(cmd, *args, **kwargs):
-    return subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        universal_newlines=True,
-        *args,
-        **kwargs,
-    )
+def acquire_lock():
+    if os.path.exists(lockfile_path):
+        logging.error("Another instance of the script is running.")
+        print(f"{RED}Another instance of the script is running.{RESET}")
+        sys.exit(1)
+    else:
+        with open(lockfile_path, 'w') as lock_file:
+            lock_file.write(str(os.getpid()))
+        logging.info("Lock acquired, no other instances are running.")
+        print(f"{GREEN}Lock acquired, no other instances are running.{RESET}")
+
+def release_lock():
+    if os.path.exists(lockfile_path):
+        os.remove(lockfile_path)
+        logging.info("Lock released, script completed.")
+        print(f"{GREEN}Lock released, script completed.{RESET}")
 
 def get_zfs_fs_list():
-    fslist = run_subprocess(["zfs", "list", "-Hp", "-o", "name"])
-    fslist = fslist.stdout
-    result = {}
+    fslist = run_subprocess(["zfs", "list", "-Hp", "-o", "name"]).stdout.strip().split("\n")
+    return {fs: {} for fs in fslist if fs}
 
-    for line in fslist.split("\n"):
-        parts = line.split("\n")
-        fs = parts[-1]
-        result[fs] = {}
+def send_to_zabbix(host, key, value):
+    sanitized_value = value.replace('\n', '\\n').replace('"', '').replace('\\', '\\\\')
+    cmd = [
+        "sudo", "zabbix_sender",
+        "-z", ZABBIX_SERVER,
+        "-s", host,
+        "--tls-connect", "psk",
+        "--tls-psk-identity", PSK_IDENTITY,
+        "--tls-psk-file", PSK_FILE,
+        "-k", key,
+        "-o", sanitized_value
+    ]
+    process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if process.returncode != 0:
+        print(f"Error sending data to Zabbix: {process.stderr.strip()}")
+    else:
+        print(f"Data sent to Zabbix: {process.stdout.strip()}")
 
-        for i in range(len(parts) - 2, -1, -1):
-            result = {parts[i]: result}
+def set_backup_property(fs, status, message):
+    timestamp = datetime.datetime.now().isoformat()
+    status_message = f"{status} at {timestamp}: {message}"
+    subprocess.run(["zfs", "set", f"zab:lastbackup={status_message}", fs])
 
-    return {k: v for k, v in result.items() if k != ""}
-
-def run_backup(dry_run, fs, zabselect, server, retention, path):
+def run_backup(dry_run, fs, zabselect, server, retention, path, include_snapshots):
     command_parts = [
         "/usr/local/bin/zfs-autobackup",
         zabselect,
@@ -60,101 +105,73 @@ def run_backup(dry_run, fs, zabselect, server, retention, path):
         server,
         "--keep-target",
         retention,
-        "--exclude-unchanged",
+        "--strip-path", "1",
+        "--other-snapshots",
+        "--destroy-incompatible",
+        "--clear-mountpoint",  # Ensure received dataset does not retain mountpoint
     ]
-    if dry_run:
-        print(f"{GREEN}Backup Retention:{RESET}{retention} {GREEN}Command:{RESET}{' '.join(command_parts)}")
-    else:
-        run = run_subprocess(command_parts)
-        print(run.stdout)
-        print(run.stderr)
-
-
-def run_sandbox_backup(dry_run, fs, zabselect, retention):
-    command_parts = [
-        "/usr/local/bin/zfs-autobackup",
-        zabselect,
-        fs,
-        "--verbose",
-        "--keep-source",
-        retention,
-        "--exclude-unchanged",
-    ]
+    if include_snapshots:
+        command_parts.append("--other-snapshots")
 
     if dry_run:
-        print(f"{GREEN}Backup Type:{RESET}{zabselect} {GREEN}Command:{RESET}{' '.join(command_parts)}")
+        print(f"{GREEN}Backup Retention:{RESET} {retention} {GREEN}Command:{RESET} {' '.join(command_parts)}")
+        set_backup_property(fs, "dry-run", "No actual backup performed")
     else:
         run = run_subprocess(command_parts)
-        print(run.stdout)
-        print(run.stderr)
-
-def check_orphans(fs, result):
-    zfsautobackup = "false"
-    backupfstype = run_subprocess(["zfs", "get", "-H", "-o", "value", "zab:backuptype", fs])
-    backupfstype = backupfstype.stdout
-
-    for j in result:
-        j = "autobackup:" + j.replace("/", "-")
-	
-        orphanfs = run_subprocess(["zfs", "get", "-H", "-o", "value", j, fs])
-        orphanfs = orphanfs.stdout
-
-        if "true" in orphanfs:
-            zfsautobackup = "true"
-            break
-
-    if "false" in zfsautobackup:
-        if "scratch" in backupfstype:
-            print(f"{YELLOW}filesystem backup type is scratch: {RESET}" + fs)
+        if run.returncode == 0:
+            set_backup_property(fs, "success", "Backup successful")
         else:
-            print(f"{RED}filesystem autobackup:zab not defined: {fs} {RESET}")
-    elif "scratch" in backupfstype:
-        print(f"{YELLOW}filesystem backup type is scratch: {RESET}" + fs)
+            set_backup_property(fs, "failed", f"Backup failed: {run.stderr}")
+        print(run.stdout)
+        print(run.stderr)
 
-
-def zabwrap(dry_run, orphans, limit):
+def zabwrap(dry_run, orphans, limit, debug, include_snapshots):
     result = get_zfs_fs_list() if not limit else limit
+    for fs in result:
+        zabprop = "autobackup:" + fs.replace("/", "-").lower()
+        zabselect = fs.replace("/", "-").lower()
+        backupsfs = run_subprocess(["zfs", "get", "-s", "local", "-H", "-o", "value", zabprop, fs]).stdout.strip()
 
-    if orphans:
-        for fs in result:
-            check_orphans(fs, result)
-    else:
-        for fs in result:
-            zabprop = "autobackup:" + fs.replace("/", "-")
-            zabprop = re.sub(pattern, to_lowercase, zabprop)
-            zabselect = fs.replace("/", "-")
-            zabselect = re.sub(pattern, to_lowercase, zabselect)
-            backupsfs = run_subprocess(["zfs", "get", "-s", "local", "-H", "-o", "value", zabprop, fs]) 
-            backupsfs = backupsfs.stdout
+        if "true" in backupsfs:
+            if debug:
+                print(f'Filesystems with autobackup:zab=true: {fs}')
+            backupfstype = run_subprocess(["zfs", "get", "-H", "-o", "value", "zab:backuptype", fs]).stdout.strip()
 
-            if "true" in backupsfs:  # is this part of the zab backup group? if yes check what type it is
-                backupfstype = run_subprocess(["zfs", "get", "-H", "-o", "value", "zab:backuptype", fs])
-                backupfstype = backupfstype.stdout
-
-                for types in BACKUP_TYPES:
-                    if "scratch" in backupfstype:  # check if its scratch and if it is ignore it
-                        break
-                    elif types in backupfstype:  # check what server(s) this fs should be backed up to
-                        backupdest = subprocess.run(
-                            ["zfs", "get", "-H", "-o", "value", "zab:server", fs], 
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            universal_newlines=True,
-                        )
-                        backupdest = backupdest.stdout.strip("[ ]\n")
-                        backupServers = backupdest.split(",")
-                        for server in backupServers:  # generate a command for each backup destination defined with the correct backup retention
+            if backupfstype in BACKUP_TYPES:
+                if backupfstype == "scratch":
+                    print(f"{YELLOW}Filesystem backup type is scratch: {RESET}{fs}")
+                    continue
+                elif backupfstype == "sandbox":
+                    retention = BACKUP_TYPES["sandbox"]
+                    run_backup(dry_run, fs, zabselect, "", retention, "", include_snapshots)
+                else:
+                    backupdest = run_subprocess(["zfs", "get", "-H", "-o", "value", "zab:server", fs]).stdout.strip()
+                    backupServers = backupdest.split(",")
+                    for server in backupServers:
+                        try:
                             server, path = server.split(':')
+                        except ValueError:
+                            logging.error(f'The zfs attribute zab:server contains an error: {server}')
+                            print(f'The zfs attribute zab:server contains an error: {server}')
+                        else:
                             path = path.replace("-", "/")
-                            if types == "sandbox":
-                                run_sandbox_backup(dry_run, fs, zabselect, BACKUP_TYPES[types], path) 
-                            else:    
-                                run_backup(dry_run, fs, zabselect, server, BACKUP_TYPES[types], path)
+                            retention = BACKUP_TYPES[backupfstype]
+                            run_backup(dry_run, fs, zabselect, server, retention, path, include_snapshots)
+            else:
+                logging.error(f'Unknown backup type for filesystem: {fs}')
+                print(f'{RED}Unknown backup type for filesystem: {fs}{RESET}')
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ZFS autobackup wrapper")
-    parser.add_argument("--dry-run", "-d", action="store_true", help="print the commands to be run")
-    parser.add_argument("--orphans", "-o", action="store_true", help="print a list of filesystems set to not backup")
-    parser.add_argument("--limit", "-l", nargs="+", help="supply a list of filesystems to run zfs-autobackup on, must be in raid/fs format")
-    args = parser.parse_args()
-    zabwrap(args.dry_run, args.orphans, args.limit)
+    acquire_lock()
+    try:
+        parser = argparse.ArgumentParser(description="ZFS autobackup wrapper")
+        parser.add_argument("--dry-run", "-d", action="store_true", help="Print the commands to be run")
+        parser.add_argument("--orphans", "-o", action="store_true", help="Print a list of filesystems set to not backup")
+        parser.add_argument("--limit", "-l", nargs="+", help="Limit the list of filesystems to process")
+        parser.add_argument("--debug", "-v", action="store_true", help="Print debug information")
+        parser.add_argument("--include_snapshots", "-s", action="store_true", help="Include all snapshots from the ZFS FS")
+        args = parser.parse_args()
+
+        zabwrap(args.dry_run, args.orphans, args.limit, args.debug, args.include_snapshots)
+    finally:
+        release_lock()
