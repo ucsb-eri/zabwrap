@@ -155,7 +155,9 @@ def zabwrap(dry_run, orphans, limit, debug, include_snapshots):
                             logging.error(f'The zfs attribute zab:server contains an error: {server}')
                             print(f'The zfs attribute zab:server contains an error: {server}')
                         else:
+                            path = path.replace("--", "<<HYPHEN>>")
                             path = path.replace("-", "/")
+                            path = path.replace("<<HYPHEN>>", "-")
                             retention = BACKUP_TYPES[backupfstype]
                             run_backup(dry_run, fs, zabselect, server, retention, path, include_snapshots)
             else:
