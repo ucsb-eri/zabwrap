@@ -15,8 +15,8 @@ logfile_path = "/var/log/zfs_backup.log"
 # Backup settings
 BACKUP_TYPES = {
     "one": "175,1h5d,1w1y",
-    "r2": "652,1h10d,1d1y",
-    "r1": "651,1h10d,1d1y",
+    "r2": "650,1h10d,1d1y",
+    "r1": "650,1h10d,1d1y",
     "r0": "0",
     "sandbox": "250,1h10d",
     "raid-sandbox": "10,1h10d",
