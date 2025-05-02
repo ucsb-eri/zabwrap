@@ -110,6 +110,7 @@ def run_backup(dry_run, fs, zabselect, server, retention, path, include_snapshot
         "--other-snapshots",
         "--destroy-incompatible",
         "--clear-mountpoint",  # Ensure received dataset does not retain mountpoint
+        "--exclude-received", # Ensure received dataset is ignored on shared ZAB systems
     ]
     if include_snapshots:
         command_parts.append("--other-snapshots")
