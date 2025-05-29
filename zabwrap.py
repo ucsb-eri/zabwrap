@@ -37,7 +37,7 @@ RESET = "\033[0m"
 # Configure logging
 logging.basicConfig(filename=logfile_path, level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
-def run_subprocess(cmd, use_sudo=False, timeout=300):
+def run_subprocess(cmd, use_sudo=False, timeout=None):
     if use_sudo:
         cmd.insert(0, 'sudo')
     try:
@@ -120,12 +120,16 @@ def run_backup(dry_run, fs, zabselect, server, retention, path, include_snapshot
         set_backup_property(fs, "dry-run", "No actual backup performed")
     else:
         run = run_subprocess(command_parts)
-        if run.returncode == 0:
-            set_backup_property(fs, "success", "Backup successful")
+        if not run:
+            set_backup_property(fs, "failed", f"Backup timed out: {' '.join(command_parts)}")
         else:
-            set_backup_property(fs, "failed", f"Backup failed: {run.stderr}")
-        print(run.stdout)
-        print(run.stderr)
+            if run.returncode == 0:
+                set_backup_property(fs, "success", "Backup successful")
+            else:
+                set_backup_property(fs, "failed", f"Backup failed: {run.stderr}")
+
+            print(run.stdout)
+            print(run.stderr)
 
 def zabwrap(dry_run, orphans, limit, debug, include_snapshots):
     result = get_zfs_fs_list() if not limit else limit
