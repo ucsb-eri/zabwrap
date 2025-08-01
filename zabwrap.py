@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 import subprocess
 import argparse
-import re
 import os
 import sys
 import logging
-import socket
 import datetime
 
 # Lockfile and logging settings
@@ -35,7 +33,8 @@ GREEN = "\033[32m"
 RESET = "\033[0m"
 
 # Configure logging
-logging.basicConfig(filename=logfile_path, level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+logging.basicConfig(filename=logfile_path, level=logging.INFO,
+                    format='%(asctime)s %(levelname)s %(message)s')
 
 def run_subprocess(cmd, use_sudo=False, timeout=None):
     if use_sudo:
@@ -109,8 +108,8 @@ def run_backup(dry_run, fs, zabselect, server, retention, path, include_snapshot
         "--strip-path", "1",
         "--other-snapshots",
         "--destroy-incompatible",
-        "--clear-mountpoint",  # Ensure received dataset does not retain mountpoint
-        "--exclude-received", # Ensure received dataset is ignored on shared ZAB systems
+        "--clear-mountpoint",
+        "--exclude-received",
     ]
     if include_snapshots:
         command_parts.append("--other-snapshots")
@@ -127,9 +126,37 @@ def run_backup(dry_run, fs, zabselect, server, retention, path, include_snapshot
                 set_backup_property(fs, "success", "Backup successful")
             else:
                 set_backup_property(fs, "failed", f"Backup failed: {run.stderr}")
-
             print(run.stdout)
             print(run.stderr)
+
+def run_sandbox_backup(dry_run, fs, zabselect, retention, include_snapshots):
+    """Local snapshot-only backup for sandbox datasets"""
+    cmd = [
+        "/usr/local/bin/zfs-autobackup",
+        zabselect,
+        fs,
+        "--verbose",
+        "--keep-source",
+        retention,
+        "--keep-target",
+        retention,
+        "--strip-path", "1",
+        "--other-snapshots",
+        "--destroy-incompatible",
+        "--clear-mountpoint",
+        "--exclude-received",
+    ]
+    if include_snapshots:
+        cmd.append("--other-snapshots")
+
+    if dry_run:
+        print(f"Sandbox dry run: {' '.join(cmd)}")
+    else:
+        run = run_subprocess(cmd)
+        if run and run.returncode == 0:
+            set_backup_property(fs, "success", "Sandbox backup successful")
+        else:
+            set_backup_property(fs, "failed", f"Sandbox backup failed: {run.stderr if run else 'timeout'}")
 
 def zabwrap(dry_run, orphans, limit, debug, include_snapshots):
     result = get_zfs_fs_list() if not limit else limit
@@ -149,7 +176,8 @@ def zabwrap(dry_run, orphans, limit, debug, include_snapshots):
                     continue
                 elif backupfstype == "sandbox":
                     retention = BACKUP_TYPES["sandbox"]
-                    run_backup(dry_run, fs, zabselect, "", retention, "", include_snapshots)
+                    print(f"{YELLOW}Running local-only sandbox snapshots for {fs}{RESET}")
+                    run_sandbox_backup(dry_run, fs, zabselect, retention, include_snapshots)
                 else:
                     backupdest = run_subprocess(["zfs", "get", "-H", "-o", "value", "zab:server", fs]).stdout.strip()
                     backupServers = backupdest.split(",")
