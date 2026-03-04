@@ -134,7 +134,6 @@ def run_sandbox_backup(dry_run, fs, zabselect, retention, include_snapshots):
     cmd = [
         "/usr/local/bin/zfs-autobackup",
         zabselect,
-        fs,
         "--verbose",
         "--keep-source",
         retention,
