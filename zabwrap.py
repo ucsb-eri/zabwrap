@@ -107,6 +107,15 @@ def release_lock():
             print(f"{RED}Error releasing lock: {e}{RESET}")
 
 
+def truncate_message(message, max_len=1000):
+    if not message:
+        return ""
+    message = message.strip()
+    if len(message) <= max_len:
+        return message
+    return message[-max_len:]
+
+
 def get_zfs_fs_list():
     run = run_subprocess(["zfs", "list", "-Hp", "-o", "name"])
 
@@ -142,11 +151,13 @@ def send_to_zabbix(host, key, value):
 
 def set_backup_property(fs, status, message):
     timestamp = datetime.datetime.now().isoformat()
-    status_message = f"{status} at {timestamp}: {message}"
+    status_message = f"{status} at {timestamp}: {truncate_message(message)}"
     subprocess.run(["zfs", "set", f"zab:lastbackup={status_message}", fs])
 
 
-def run_backup(dry_run, fs, zabselect, server, retention, path, include_snapshots):
+def run_backup(dry_run, fs, zabselect, server, retention, path):
+    target = f"{server}:{path}"
+
     command_parts = [
         "/usr/local/bin/zfs-autobackup",
         zabselect,
@@ -159,38 +170,45 @@ def run_backup(dry_run, fs, zabselect, server, retention, path, include_snapshot
         "--keep-target",
         retention,
         "--strip-path", "1",
+        "--other-snapshots",
         "--destroy-incompatible",
         "--clear-mountpoint",
         "--exclude-received",
     ]
 
-    if include_snapshots:
-        command_parts.append("--other-snapshots")
-
     if dry_run:
+        logging.info(f"Dry-run backup fs={fs} target={target} retention={retention}")
         print(f"{GREEN}Backup Retention:{RESET} {retention} {GREEN}Command:{RESET} {' '.join(command_parts)}")
-        set_backup_property(fs, "dry-run", "No actual backup performed")
+        set_backup_property(fs, "dry-run", f"No actual backup performed for target {target}")
         return True
+
+    logging.info(f"Starting backup fs={fs} target={target} retention={retention}")
 
     run = run_subprocess(command_parts)
 
     if not run:
-        set_backup_property(fs, "failed", f"Backup timed out: {' '.join(command_parts)}")
+        logging.error(f"Finished backup fs={fs} target={target} status=failed reason=timeout")
+        set_backup_property(fs, "failed", f"Backup timed out for target {target}: {' '.join(command_parts)}")
         return False
 
     print(run.stdout)
     print(run.stderr)
 
     if run.returncode == 0:
-        set_backup_property(fs, "success", "Backup successful")
+        logging.info(f"Finished backup fs={fs} target={target} status=success")
+        set_backup_property(fs, "success", f"Backup successful for target {target}")
         return True
 
-    set_backup_property(fs, "failed", f"Backup failed: {run.stderr}")
+    stderr = truncate_message(run.stderr)
+    logging.error(f"Finished backup fs={fs} target={target} status=failed rc={run.returncode} stderr={stderr}")
+    set_backup_property(fs, "failed", f"Backup failed for target {target}: {stderr}")
     return False
 
 
-def run_sandbox_backup(dry_run, fs, zabselect, retention, include_snapshots):
+def run_sandbox_backup(dry_run, fs, zabselect, retention):
     """Local snapshot-only backup for sandbox datasets"""
+    target = "local-sandbox"
+
     cmd = [
         "/usr/local/bin/zfs-autobackup",
         zabselect,
@@ -200,40 +218,79 @@ def run_sandbox_backup(dry_run, fs, zabselect, retention, include_snapshots):
         "--keep-target",
         retention,
         "--strip-path", "1",
+        "--other-snapshots",
         "--destroy-incompatible",
         "--clear-mountpoint",
         "--exclude-received",
     ]
 
-    if include_snapshots:
-        cmd.append("--other-snapshots")
-
     if dry_run:
+        logging.info(f"Dry-run sandbox backup fs={fs} target={target} retention={retention}")
         print(f"Sandbox dry run: {' '.join(cmd)}")
         set_backup_property(fs, "dry-run", "No actual sandbox backup performed")
         return True
+
+    logging.info(f"Starting sandbox backup fs={fs} target={target} retention={retention}")
 
     run = run_subprocess(cmd)
 
     if run and run.returncode == 0:
         print(run.stdout)
         print(run.stderr)
+        logging.info(f"Finished sandbox backup fs={fs} target={target} status=success")
         set_backup_property(fs, "success", "Sandbox backup successful")
         return True
 
     if run:
         print(run.stdout)
         print(run.stderr)
-        set_backup_property(fs, "failed", f"Sandbox backup failed: {run.stderr}")
+        stderr = truncate_message(run.stderr)
+        logging.error(f"Finished sandbox backup fs={fs} target={target} status=failed rc={run.returncode} stderr={stderr}")
+        set_backup_property(fs, "failed", f"Sandbox backup failed: {stderr}")
     else:
+        logging.error(f"Finished sandbox backup fs={fs} target={target} status=failed reason=timeout")
         set_backup_property(fs, "failed", "Sandbox backup failed: timeout")
 
     return False
 
 
+def run_filesystem_job_group(dry_run, fs, jobs):
+    """
+    Runs all backup targets for one filesystem serially.
+
+    This allows different filesystems to run in parallel while preventing
+    multiple zfs-autobackup processes from operating on the same source FS
+    at the same time.
+    """
+    ok = True
+
+    for job in jobs:
+        if job["kind"] == "sandbox":
+            job_ok = run_sandbox_backup(
+                dry_run,
+                job["fs"],
+                job["zabselect"],
+                job["retention"],
+            )
+        else:
+            job_ok = run_backup(
+                dry_run,
+                job["fs"],
+                job["zabselect"],
+                job["server"],
+                job["retention"],
+                job["path"],
+            )
+
+        if not job_ok:
+            ok = False
+
+    return ok
+
+
 def build_backup_jobs(limit, debug):
     result = get_zfs_fs_list() if not limit else limit
-    jobs = []
+    jobs_by_fs = {}
 
     for fs in result:
         zabprop = "autobackup:" + fs.replace("/", "-").lower()
@@ -278,11 +335,12 @@ def build_backup_jobs(limit, debug):
 
         if backupfstype == "sandbox":
             retention = BACKUP_TYPES["sandbox"]
-            jobs.append({
+            jobs_by_fs.setdefault(fs, []).append({
                 "kind": "sandbox",
                 "fs": fs,
                 "zabselect": zabselect,
                 "retention": retention,
+                "target": "local-sandbox",
             })
             continue
 
@@ -300,7 +358,7 @@ def build_backup_jobs(limit, debug):
 
         for server_entry in backup_servers:
             try:
-                server, path = server_entry.split(":")
+                server, path = server_entry.split(":", 1)
             except ValueError:
                 logging.error(f"The zfs attribute zab:server contains an error: {server_entry}")
                 print(f"The zfs attribute zab:server contains an error: {server_entry}")
@@ -311,76 +369,74 @@ def build_backup_jobs(limit, debug):
             path = path.replace("<<HYPHEN>>", "-")
 
             retention = BACKUP_TYPES[backupfstype]
+            target = f"{server}:{path}"
 
-            jobs.append({
+            jobs_by_fs.setdefault(fs, []).append({
                 "kind": "remote",
                 "fs": fs,
                 "zabselect": zabselect,
                 "server": server,
                 "retention": retention,
                 "path": path,
+                "target": target,
             })
 
-    return jobs
+    return jobs_by_fs
 
 
-def zabwrap(dry_run, orphans, limit, debug, include_snapshots, workers):
-    jobs = build_backup_jobs(limit, debug)
+def zabwrap(dry_run, orphans, limit, debug, workers):
+    jobs_by_fs = build_backup_jobs(limit, debug)
 
-    if not jobs:
+    if not jobs_by_fs:
         print("No backup jobs found.")
         return True
 
-    workers = max(1, min(workers, len(jobs)))
+    workers = max(1, min(workers, len(jobs_by_fs)))
 
-    print(f"{GREEN}Starting {len(jobs)} backup job(s) with {workers} worker(s){RESET}")
+    total_jobs = sum(len(jobs) for jobs in jobs_by_fs.values())
+
+    print(
+        f"{GREEN}Starting {total_jobs} backup target(s) "
+        f"across {len(jobs_by_fs)} filesystem(s) "
+        f"with {workers} worker(s){RESET}"
+    )
 
     failed = []
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        future_to_job = {}
+        future_to_fs = {}
 
-        for job in jobs:
-            if job["kind"] == "sandbox":
-                future = executor.submit(
-                    run_sandbox_backup,
-                    dry_run,
-                    job["fs"],
-                    job["zabselect"],
-                    job["retention"],
-                    include_snapshots,
-                )
-            else:
-                future = executor.submit(
-                    run_backup,
-                    dry_run,
-                    job["fs"],
-                    job["zabselect"],
-                    job["server"],
-                    job["retention"],
-                    job["path"],
-                    include_snapshots,
-                )
+        for fs, jobs in jobs_by_fs.items():
+            future = executor.submit(
+                run_filesystem_job_group,
+                dry_run,
+                fs,
+                jobs,
+            )
+            future_to_fs[future] = {
+                "fs": fs,
+                "targets": [job.get("target", "unknown") for job in jobs],
+            }
 
-            future_to_job[future] = job
-
-        for future in as_completed(future_to_job):
-            job = future_to_job[future]
-            fs = job["fs"]
+        for future in as_completed(future_to_fs):
+            job_group = future_to_fs[future]
+            fs = job_group["fs"]
 
             try:
                 ok = future.result()
                 if not ok:
-                    failed.append(fs)
+                    for target in job_group["targets"]:
+                        failed.append(f"{fs} -> {target}")
             except Exception as exc:
-                logging.error(f"Backup job for {fs} generated an exception: {exc}")
-                print(f"{RED}Backup job for {fs} generated an exception: {exc}{RESET}")
-                failed.append(fs)
+                logging.error(f"Backup job group for {fs} generated an exception: {exc}")
+                print(f"{RED}Backup job group for {fs} generated an exception: {exc}{RESET}")
+                for target in job_group["targets"]:
+                    failed.append(f"{fs} -> {target}")
 
     if failed:
         print(f"{RED}Failed backup jobs:{RESET}")
-        for fs in sorted(set(failed)):
-            print(f"  - {fs}")
+        for item in sorted(set(failed)):
+            print(f"  - {item}")
         return False
 
     print(f"{GREEN}All backup jobs completed successfully.{RESET}")
@@ -397,7 +453,6 @@ if __name__ == "__main__":
         parser.add_argument("--orphans", "-o", action="store_true", help="Print a list of filesystems set to not backup")
         parser.add_argument("--limit", "-l", nargs="+", help="Limit the list of filesystems to process")
         parser.add_argument("--debug", "-v", action="store_true", help="Print debug information")
-        parser.add_argument("--include_snapshots", "-s", action="store_true", help="Include all snapshots from the ZFS FS")
         parser.add_argument("--workers", "-w", type=int, default=2, help="Number of filesystem backups to run in parallel")
         args = parser.parse_args()
 
@@ -406,7 +461,6 @@ if __name__ == "__main__":
             args.orphans,
             args.limit,
             args.debug,
-            args.include_snapshots,
             args.workers,
         )
 
