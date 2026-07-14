@@ -1,16 +1,4 @@
 #!/usr/bin/env python3
-"""ZFS autobackup wrapper with layered local configuration support.
-
-Configuration is loaded in this order:
-
-1. Built-in defaults in this file.
-2. /etc/zabwrap/zabwrap.conf (normally managed by Ansible).
-3. /etc/zabwrap/zabwrap.d/*.conf in lexical order (local overrides).
-
-Later files override earlier files. The configuration locations can be changed
-with --config/--config-dir or the ZABWRAP_CONFIG/ZABWRAP_CONFIG_DIR
-environment variables.
-"""
 
 import argparse
 import configparser
@@ -27,7 +15,6 @@ from typing import Dict, List, Optional, Sequence
 DEFAULT_CONFIG_FILE = "/etc/zabwrap/zabwrap.conf"
 DEFAULT_CONFIG_DIR = "/etc/zabwrap/zabwrap.d"
 
-# Snapshot retention counts intentionally left unchanged.
 DEFAULT_BACKUP_TYPES = {
     "one": "175,1h5d,1w1y",
     "r2": "650,1h10d,1d1y",
