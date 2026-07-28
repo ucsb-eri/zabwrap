@@ -556,7 +556,10 @@ def run_backup(
         server,
         "--keep-target",
         retention,
-        "--clear-mountpoint",
+        "--filter-properties",
+        "mountpoint",
+        "--set-properties",
+        "canmount=off",
         "--exclude-received",
     ]
 
