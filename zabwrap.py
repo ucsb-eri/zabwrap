@@ -556,16 +556,10 @@ def run_backup(
         server,
         "--keep-target",
         retention,
-        "--strip-path",
-        "1",
         "--clear-mountpoint",
         "--exclude-received",
-        # Always enabled by design. This preserves and transfers snapshots
-        # not created by zfs-autobackup.
-        "--other-snapshots",
     ]
 
-    # --destroy-incompatible is intentionally not used during routine backups.
     return execute_zfs_autobackup(
         settings,
         command_parts,
