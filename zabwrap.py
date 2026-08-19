@@ -5,6 +5,7 @@ import configparser
 import datetime
 import logging
 import os
+import socket
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -545,10 +546,20 @@ def run_backup(
     retention: str,
     path: str,
 ) -> bool:
+    # Keep backups from different source servers in distinct dataset trees.
+    # Use the short hostname so an FQDN change does not alter the backup path.
+    source_hostname = socket.gethostname().split(".", 1)[0].strip().lower()
+    if not source_hostname:
+        raise RuntimeError("Unable to determine the source server hostname")
+
+    target_path = f"{path.rstrip('/')}/{source_hostname}"
+
     command_parts = [
         settings.zfs_autobackup,
         zabselect,
-        path,
+        target_path,
+        "--strip-path",
+        "1",
         "--verbose",
         "--keep-source",
         retention,
