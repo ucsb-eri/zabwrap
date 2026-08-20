@@ -5,12 +5,13 @@ import configparser
 import datetime
 import logging
 import os
+import shlex
 import socket
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 
 DEFAULT_CONFIG_FILE = "/etc/zabwrap/zabwrap.conf"
@@ -537,6 +538,107 @@ def execute_zfs_autobackup(
     return False
 
 
+def ensure_remote_target(
+    settings: Settings,
+    server: str,
+    target_path: str,
+    dry_run: bool,
+    prepared_targets: Set[Tuple[str, str]],
+) -> bool:
+    """Ensure the hostname-specific target root exists on the remote server."""
+    target_key = (server, target_path)
+    if target_key in prepared_targets:
+        return True
+
+    quoted_path = shlex.quote(target_path)
+    check_command = [
+        "ssh",
+        server,
+        f"zfs list -H -o name {quoted_path} >/dev/null 2>&1",
+    ]
+    logging.info(
+        "Checking remote target: server=%s path=%s",
+        server,
+        target_path,
+    )
+    check_result = run_subprocess(
+        check_command,
+        timeout=settings.command_timeout_seconds,
+    )
+
+    if check_result is not None and check_result.returncode == 0:
+        prepared_targets.add(target_key)
+        return True
+
+    if dry_run:
+        error = (
+            check_result.stderr.strip()
+            if check_result is not None and check_result.stderr.strip()
+            else "dataset does not exist or could not be accessed"
+        )
+        message = (
+            f"Remote target {target_path} is not available on {server}: {error}. "
+            "A live run would attempt to create it."
+        )
+        logging.error(message)
+        print(f"{RED}{message}{RESET}", file=sys.stderr)
+        return False
+
+    print(
+        f"{YELLOW}Remote target {server}:{target_path} does not exist; "
+        f"creating it.{RESET}"
+    )
+    logging.info(
+        "Creating missing remote target: server=%s path=%s",
+        server,
+        target_path,
+    )
+    create_command = [
+        "ssh",
+        server,
+        (
+            f"zfs create -p -o canmount=off -o mountpoint=none "
+            f"{quoted_path}"
+        ),
+    ]
+    create_result = run_subprocess(
+        create_command,
+        timeout=settings.command_timeout_seconds,
+    )
+    if create_result is not None and create_result.returncode == 0:
+        prepared_targets.add(target_key)
+        if create_result.stdout.strip():
+            print(create_result.stdout.strip())
+        return True
+
+    error = (
+        create_result.stderr.strip()
+        if create_result is not None and create_result.stderr.strip()
+        else "remote zfs create did not run successfully"
+    )
+    message = (
+        f"Unable to create remote target {target_path} on {server}: {error}"
+    )
+
+    # A concurrent wrapper might have created the dataset after our check.
+    recheck_result = run_subprocess(
+        check_command,
+        timeout=settings.command_timeout_seconds,
+    )
+    if recheck_result is not None and recheck_result.returncode == 0:
+        prepared_targets.add(target_key)
+        logging.info(
+            "Remote target appeared after create attempt: server=%s path=%s",
+            server,
+            target_path,
+        )
+        return True
+
+    logging.error(message)
+    print(f"{RED}{message}{RESET}", file=sys.stderr)
+    return False
+
+
 def run_backup(
     settings: Settings,
     dry_run: bool,
@@ -545,6 +647,7 @@ def run_backup(
     server: str,
     retention: str,
     path: str,
+    prepared_targets: Set[Tuple[str, str]],
 ) -> bool:
     # Keep backups from different source servers in distinct dataset trees.
     # Use the short hostname so an FQDN change does not alter the backup path.
@@ -553,6 +656,22 @@ def run_backup(
         raise RuntimeError("Unable to determine the source server hostname")
 
     target_path = f"{path.rstrip('/')}/{source_hostname}"
+
+    if not ensure_remote_target(
+        settings,
+        server,
+        target_path,
+        dry_run,
+        prepared_targets,
+    ):
+        if not dry_run:
+            set_backup_property(
+                settings,
+                fs,
+                "failed",
+                f"Unable to prepare remote target {server}:{target_path}",
+            )
+        return False
 
     command_parts = [
         settings.zfs_autobackup,
@@ -660,6 +779,7 @@ def zabwrap(
 ) -> bool:
     filesystems = list(limit) if limit else list(get_zfs_fs_list(settings))
     all_succeeded = True
+    prepared_targets: Set[Tuple[str, str]] = set()
 
     for fs in filesystems:
         zabprop = "autobackup:" + fs.replace("/", "-").lower()
@@ -785,6 +905,7 @@ def zabwrap(
                 server,
                 retention,
                 path,
+                prepared_targets,
             ):
                 all_succeeded = False
 
