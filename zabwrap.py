@@ -5,6 +5,7 @@ import configparser
 import datetime
 import logging
 import os
+import re
 import shlex
 import socket
 import subprocess
@@ -95,6 +96,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--print-config",
         action="store_true",
         help="Print the effective configuration and exit",
+    )
+    parser.add_argument(
+        "--migrate-legacy",
+        action="store_true",
+        help=(
+            "Rename a matching legacy target tree into the hostname-prefixed "
+            "layout and rename legacy snapshots on source and target"
+        ),
     )
     return parser
 
@@ -652,6 +661,283 @@ def ensure_remote_target(
     return False
 
 
+def list_zfs_names(
+    settings: Settings,
+    root: str,
+    object_type: str,
+    server: Optional[str] = None,
+) -> Optional[List[str]]:
+    """List datasets or snapshots locally or through the target SSH host."""
+    zfs_command = [
+        "zfs",
+        "list",
+        "-H",
+        "-t",
+        object_type,
+        "-o",
+        "name",
+        "-r",
+        root,
+    ]
+    command = zfs_command
+    if server:
+        command = [
+            "ssh",
+            server,
+            " ".join(shlex.quote(part) for part in zfs_command),
+        ]
+
+    result = run_subprocess(command, timeout=settings.command_timeout_seconds)
+    if result is None or result.returncode != 0:
+        return None
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def remote_dataset_exists(
+    settings: Settings,
+    server: str,
+    dataset: str,
+) -> bool:
+    quoted_dataset = shlex.quote(dataset)
+    result = run_subprocess(
+        [
+            "ssh",
+            server,
+            f"zfs list -H -o name {quoted_dataset} >/dev/null 2>&1",
+        ],
+        timeout=settings.command_timeout_seconds,
+    )
+    return result is not None and result.returncode == 0
+
+
+def relative_dataset_names(names: Sequence[str], root: str) -> Set[str]:
+    """Convert a recursive dataset list to paths relative to its root."""
+    relative: Set[str] = set()
+    prefix = root + "/"
+    for name in names:
+        if name == root:
+            relative.add("")
+        elif name.startswith(prefix):
+            relative.add(name[len(prefix):])
+    return relative
+
+
+def rename_legacy_snapshots(
+    settings: Settings,
+    root: str,
+    zabselect: str,
+    source_hostname: str,
+    dry_run: bool,
+    server: Optional[str] = None,
+) -> bool:
+    """Rename legacy snapshots under root without changing their GUIDs."""
+    snapshots = list_zfs_names(settings, root, "snapshot", server=server)
+    if snapshots is None:
+        location = f" on {server}" if server else " locally"
+        print(
+            f"{RED}Unable to list snapshots below {root}{location}.{RESET}",
+            file=sys.stderr,
+        )
+        return False
+
+    legacy_pattern = re.compile(
+        rf"^{re.escape(zabselect)}-(\d{{14}})$"
+    )
+    existing = set(snapshots)
+
+    for snapshot in snapshots:
+        try:
+            dataset, snapshot_name = snapshot.rsplit("@", 1)
+        except ValueError:
+            continue
+
+        match = legacy_pattern.fullmatch(snapshot_name)
+        if not match:
+            continue
+
+        renamed = (
+            f"{dataset}@{source_hostname}-{zabselect}-{match.group(1)}"
+        )
+        if renamed in existing:
+            print(
+                f"{RED}Cannot migrate snapshot because both names exist: "
+                f"{snapshot} and {renamed}{RESET}",
+                file=sys.stderr,
+            )
+            return False
+
+        location = f" on {server}" if server else ""
+        print(f"{YELLOW}[MIGRATE] {snapshot} -> {renamed}{location}{RESET}")
+        if dry_run:
+            continue
+
+        zfs_command = ["zfs", "rename", snapshot, renamed]
+        command = zfs_command
+        if server:
+            command = [
+                "ssh",
+                server,
+                " ".join(shlex.quote(part) for part in zfs_command),
+            ]
+        result = run_subprocess(
+            command,
+            timeout=settings.command_timeout_seconds,
+        )
+        if result is None or result.returncode != 0:
+            error = result.stderr.strip() if result else "zfs rename did not run"
+            print(
+                f"{RED}Unable to rename {snapshot}: {error}{RESET}",
+                file=sys.stderr,
+            )
+            return False
+        existing.discard(snapshot)
+        existing.add(renamed)
+
+    return True
+
+
+def migrate_legacy_backup(
+    settings: Settings,
+    dry_run: bool,
+    fs: str,
+    zabselect: str,
+    server: str,
+    path: str,
+    target_path: str,
+) -> bool:
+    """Move an unambiguous legacy target tree and rename its snapshots."""
+    source_hostname = get_source_hostname()
+    source_parts = fs.split("/", 1)
+    if len(source_parts) != 2 or not source_parts[1]:
+        print(
+            f"{RED}Legacy migration of a whole pool is not supported: {fs}{RESET}",
+            file=sys.stderr,
+        )
+        return False
+
+    stripped_source = source_parts[1]
+    legacy_root = f"{path.rstrip('/')}/{stripped_source}"
+    new_root = f"{target_path.rstrip('/')}/{stripped_source}"
+    legacy_exists = remote_dataset_exists(settings, server, legacy_root)
+    new_exists = remote_dataset_exists(settings, server, new_root)
+
+    if legacy_exists and new_exists:
+        print(
+            f"{RED}Cannot migrate {fs}: both {server}:{legacy_root} and "
+            f"{server}:{new_root} exist.{RESET}",
+            file=sys.stderr,
+        )
+        return False
+
+    target_snapshot_root: Optional[str] = None
+    if legacy_exists:
+        source_datasets = list_zfs_names(settings, fs, "filesystem,volume")
+        target_datasets = list_zfs_names(
+            settings,
+            legacy_root,
+            "filesystem,volume",
+            server=server,
+        )
+        if source_datasets is None or target_datasets is None:
+            print(
+                f"{RED}Unable to compare source and legacy target trees for "
+                f"{fs}.{RESET}",
+                file=sys.stderr,
+            )
+            return False
+
+        source_relative = relative_dataset_names(source_datasets, fs)
+        target_relative = relative_dataset_names(target_datasets, legacy_root)
+        if source_relative != target_relative:
+            only_source = sorted(source_relative - target_relative)
+            only_target = sorted(target_relative - source_relative)
+            print(
+                f"{RED}Refusing to migrate shared or mismatched target tree "
+                f"{server}:{legacy_root}.{RESET}",
+                file=sys.stderr,
+            )
+            if only_source:
+                print(f"  Only on source: {', '.join(only_source)}", file=sys.stderr)
+            if only_target:
+                print(f"  Only on target: {', '.join(only_target)}", file=sys.stderr)
+            return False
+
+        print(
+            f"{YELLOW}[MIGRATE] {server}:{legacy_root} -> "
+            f"{server}:{new_root}{RESET}"
+        )
+        if not dry_run:
+            parent_result = run_subprocess(
+                [
+                    "ssh",
+                    server,
+                    (
+                        f"zfs list -H -o name {shlex.quote(target_path)} "
+                        f">/dev/null 2>&1 || zfs create -p -o canmount=off "
+                        f"-o mountpoint=none {shlex.quote(target_path)}"
+                    ),
+                ],
+                timeout=settings.command_timeout_seconds,
+            )
+            if parent_result is None or parent_result.returncode != 0:
+                error = (
+                    parent_result.stderr.strip()
+                    if parent_result
+                    else "remote parent creation did not run"
+                )
+                print(f"{RED}{error}{RESET}", file=sys.stderr)
+                return False
+
+            rename_result = run_subprocess(
+                [
+                    "ssh",
+                    server,
+                    (
+                        f"zfs rename {shlex.quote(legacy_root)} "
+                        f"{shlex.quote(new_root)}"
+                    ),
+                ],
+                timeout=settings.command_timeout_seconds,
+            )
+            if rename_result is None or rename_result.returncode != 0:
+                error = (
+                    rename_result.stderr.strip()
+                    if rename_result
+                    else "remote dataset rename did not run"
+                )
+                print(f"{RED}{error}{RESET}", file=sys.stderr)
+                return False
+        target_snapshot_root = legacy_root if dry_run else new_root
+    elif new_exists:
+        target_snapshot_root = new_root
+    else:
+        print(
+            f"{YELLOW}No legacy target tree found for {fs} on {server}; "
+            f"only local legacy snapshot names will be checked.{RESET}"
+        )
+
+    if not rename_legacy_snapshots(
+        settings,
+        fs,
+        zabselect,
+        source_hostname,
+        dry_run,
+    ):
+        return False
+
+    if target_snapshot_root and not rename_legacy_snapshots(
+        settings,
+        target_snapshot_root,
+        zabselect,
+        source_hostname,
+        dry_run,
+        server=server,
+    ):
+        return False
+
+    return True
+
+
 def run_backup(
     settings: Settings,
     dry_run: bool,
@@ -661,12 +947,24 @@ def run_backup(
     retention: str,
     path: str,
     prepared_targets: Set[Tuple[str, str]],
+    migrate_legacy: bool,
 ) -> bool:
     # Keep backups from different source servers in distinct dataset trees.
     # Use the short hostname so an FQDN change does not alter the backup path.
     source_hostname = get_source_hostname()
     target_path = f"{path.rstrip('/')}/{source_hostname}"
     snapshot_format = get_snapshot_format(zabselect)
+
+    if migrate_legacy and not migrate_legacy_backup(
+        settings,
+        dry_run,
+        fs,
+        zabselect,
+        server,
+        path,
+        target_path,
+    ):
+        return False
 
     if not ensure_remote_target(
         settings,
@@ -792,6 +1090,7 @@ def zabwrap(
     orphans: bool,
     limit: Optional[Sequence[str]],
     debug: bool,
+    migrate_legacy: bool,
 ) -> bool:
     filesystems = list(limit) if limit else list(get_zfs_fs_list(settings))
     all_succeeded = True
@@ -922,6 +1221,7 @@ def zabwrap(
                 retention,
                 path,
                 prepared_targets,
+                migrate_legacy,
             ):
                 all_succeeded = False
 
@@ -961,6 +1261,7 @@ def main() -> int:
             args.orphans,
             args.limit,
             args.debug,
+            args.migrate_legacy,
         )
         return 0 if succeeded else 1
     except RuntimeError as exc:
