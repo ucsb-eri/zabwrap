@@ -538,6 +538,19 @@ def execute_zfs_autobackup(
     return False
 
 
+def get_source_hostname() -> str:
+    """Return a stable hostname component for target paths and snapshot names."""
+    source_hostname = socket.gethostname().split(".", 1)[0].strip().lower()
+    if not source_hostname:
+        raise RuntimeError("Unable to determine the source server hostname")
+    return source_hostname
+
+
+def get_snapshot_format(zabselect: str) -> str:
+    """Build a host- and selection-specific snapshot naming format."""
+    return f"{get_source_hostname()}-{zabselect}-%Y%m%d%H%M%S"
+
+
 def ensure_remote_target(
     settings: Settings,
     server: str,
@@ -651,11 +664,9 @@ def run_backup(
 ) -> bool:
     # Keep backups from different source servers in distinct dataset trees.
     # Use the short hostname so an FQDN change does not alter the backup path.
-    source_hostname = socket.gethostname().split(".", 1)[0].strip().lower()
-    if not source_hostname:
-        raise RuntimeError("Unable to determine the source server hostname")
-
+    source_hostname = get_source_hostname()
     target_path = f"{path.rstrip('/')}/{source_hostname}"
+    snapshot_format = get_snapshot_format(zabselect)
 
     if not ensure_remote_target(
         settings,
@@ -679,6 +690,8 @@ def run_backup(
         target_path,
         "--strip-path",
         "1",
+        "--snapshot-format",
+        snapshot_format,
         "--verbose",
         "--keep-source",
         retention,
@@ -710,9 +723,12 @@ def run_sandbox_backup(
     retention: str,
 ) -> bool:
     """Create and thin local snapshots without a target dataset."""
+    snapshot_format = get_snapshot_format(zabselect)
     command_parts = [
         settings.zfs_autobackup,
         zabselect,
+        "--snapshot-format",
+        snapshot_format,
         "--verbose",
         "--keep-source",
         retention,
