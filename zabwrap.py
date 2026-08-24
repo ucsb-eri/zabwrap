@@ -101,8 +101,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--migrate-legacy",
         action="store_true",
         help=(
-            "Rename a matching legacy target tree into the hostname-prefixed "
-            "layout and rename legacy snapshots on source and target"
+            "Move matching legacy target children into the hostname-prefixed "
+            "layout and rename unambiguous legacy snapshots"
         ),
     )
     return parser
@@ -805,7 +805,13 @@ def migrate_legacy_backup(
     path: str,
     target_path: str,
 ) -> bool:
-    """Move an unambiguous legacy target tree and rename its snapshots."""
+    """Move unambiguous legacy children into the hostname-prefixed tree.
+
+    The legacy root may be shared by backups from more than one source host.
+    Consequently, the root itself is never renamed.  A top-level child is
+    migrated only when it exists on both source and target and its complete
+    descendant layout matches.  Target-only children remain in place.
+    """
     source_hostname = get_source_hostname()
     source_parts = fs.split("/", 1)
     if len(source_parts) != 2 or not source_parts[1]:
@@ -821,15 +827,7 @@ def migrate_legacy_backup(
     legacy_exists = remote_dataset_exists(settings, server, legacy_root)
     new_exists = remote_dataset_exists(settings, server, new_root)
 
-    if legacy_exists and new_exists:
-        print(
-            f"{RED}Cannot migrate {fs}: both {server}:{legacy_root} and "
-            f"{server}:{new_root} exist.{RESET}",
-            file=sys.stderr,
-        )
-        return False
-
-    target_snapshot_root: Optional[str] = None
+    target_snapshot_roots: List[str] = []
     if legacy_exists:
         source_datasets = list_zfs_names(settings, fs, "filesystem,volume")
         target_datasets = list_zfs_names(
@@ -846,70 +844,130 @@ def migrate_legacy_backup(
             )
             return False
 
-        source_relative = relative_dataset_names(source_datasets, fs)
-        target_relative = relative_dataset_names(target_datasets, legacy_root)
-        if source_relative != target_relative:
-            only_source = sorted(source_relative - target_relative)
-            only_target = sorted(target_relative - source_relative)
+        source_relative = relative_dataset_names(source_datasets, fs) - {""}
+        target_relative = relative_dataset_names(target_datasets, legacy_root) - {""}
+        source_children = {name.split("/", 1)[0] for name in source_relative}
+        target_children = {name.split("/", 1)[0] for name in target_relative}
+        matching_children = sorted(source_children & target_children)
+
+        def child_tree(names: Set[str], child: str) -> Set[str]:
+            return {
+                "" if name == child else name[len(child) + 1:]
+                for name in names
+                if name == child or name.startswith(child + "/")
+            }
+
+        # Validate every candidate and destination before changing anything.
+        migrations: List[Tuple[str, str]] = []
+        for child in matching_children:
+            source_tree = child_tree(source_relative, child)
+            target_tree = child_tree(target_relative, child)
+            if source_tree != target_tree:
+                only_source = sorted(source_tree - target_tree)
+                only_target = sorted(target_tree - source_tree)
+                print(
+                    f"{RED}Refusing to migrate mismatched child "
+                    f"{server}:{legacy_root}/{child}.{RESET}",
+                    file=sys.stderr,
+                )
+                if only_source:
+                    print(
+                        f"  Only on source: {', '.join(only_source)}",
+                        file=sys.stderr,
+                    )
+                if only_target:
+                    print(
+                        f"  Only on target: {', '.join(only_target)}",
+                        file=sys.stderr,
+                    )
+                return False
+
+            old_child = f"{legacy_root}/{child}"
+            new_child = f"{new_root}/{child}"
+            if remote_dataset_exists(settings, server, new_child):
+                print(
+                    f"{RED}Cannot migrate child because both "
+                    f"{server}:{old_child} and {server}:{new_child} exist."
+                    f"{RESET}",
+                    file=sys.stderr,
+                )
+                return False
+            migrations.append((old_child, new_child))
+
+        target_only = sorted(target_children - source_children)
+        if target_only:
             print(
-                f"{RED}Refusing to migrate shared or mismatched target tree "
-                f"{server}:{legacy_root}.{RESET}",
-                file=sys.stderr,
+                f"{YELLOW}Leaving target-only children under "
+                f"{server}:{legacy_root}: {', '.join(target_only)}{RESET}"
             )
-            if only_source:
-                print(f"  Only on source: {', '.join(only_source)}", file=sys.stderr)
-            if only_target:
-                print(f"  Only on target: {', '.join(only_target)}", file=sys.stderr)
-            return False
 
-        print(
-            f"{YELLOW}[MIGRATE] {server}:{legacy_root} -> "
-            f"{server}:{new_root}{RESET}"
-        )
-        if not dry_run:
-            parent_result = run_subprocess(
-                [
-                    "ssh",
-                    server,
-                    (
-                        f"zfs list -H -o name {shlex.quote(target_path)} "
-                        f">/dev/null 2>&1 || zfs create -p -o canmount=off "
-                        f"-o mountpoint=none {shlex.quote(target_path)}"
-                    ),
-                ],
-                timeout=settings.command_timeout_seconds,
+        source_only = sorted(source_children - target_children)
+        if source_only:
+            print(
+                f"{YELLOW}No legacy target child to migrate for: "
+                f"{', '.join(source_only)}{RESET}"
             )
-            if parent_result is None or parent_result.returncode != 0:
-                error = (
-                    parent_result.stderr.strip()
-                    if parent_result
-                    else "remote parent creation did not run"
-                )
-                print(f"{RED}{error}{RESET}", file=sys.stderr)
-                return False
 
-            rename_result = run_subprocess(
-                [
-                    "ssh",
-                    server,
-                    (
-                        f"zfs rename {shlex.quote(legacy_root)} "
-                        f"{shlex.quote(new_root)}"
-                    ),
-                ],
-                timeout=settings.command_timeout_seconds,
-            )
-            if rename_result is None or rename_result.returncode != 0:
-                error = (
-                    rename_result.stderr.strip()
-                    if rename_result
-                    else "remote dataset rename did not run"
+        if migrations:
+            if not dry_run:
+                parent_result = run_subprocess(
+                    [
+                        "ssh",
+                        server,
+                        (
+                            f"zfs list -H -o name {shlex.quote(new_root)} "
+                            f">/dev/null 2>&1 || zfs create -p "
+                            f"-o canmount=off -o mountpoint=none "
+                            f"{shlex.quote(new_root)}"
+                        ),
+                    ],
+                    timeout=settings.command_timeout_seconds,
                 )
-                print(f"{RED}{error}{RESET}", file=sys.stderr)
-                return False
-        target_snapshot_root = legacy_root if dry_run else new_root
+                if parent_result is None or parent_result.returncode != 0:
+                    error = (
+                        parent_result.stderr.strip()
+                        if parent_result
+                        else "remote parent creation did not run"
+                    )
+                    print(f"{RED}{error}{RESET}", file=sys.stderr)
+                    return False
+
+            for old_child, new_child in migrations:
+                print(
+                    f"{YELLOW}[MIGRATE] {server}:{old_child} -> "
+                    f"{server}:{new_child}{RESET}"
+                )
+                if not dry_run:
+                    rename_result = run_subprocess(
+                        [
+                            "ssh",
+                            server,
+                            (
+                                f"zfs rename {shlex.quote(old_child)} "
+                                f"{shlex.quote(new_child)}"
+                            ),
+                        ],
+                        timeout=settings.command_timeout_seconds,
+                    )
+                    if rename_result is None or rename_result.returncode != 0:
+                        error = (
+                            rename_result.stderr.strip()
+                            if rename_result
+                            else "remote dataset rename did not run"
+                        )
+                        print(f"{RED}{error}{RESET}", file=sys.stderr)
+                        return False
+                target_snapshot_roots.append(
+                    old_child if dry_run else new_child
+                )
+
+        if not migrations and not new_exists:
+            print(
+                f"{YELLOW}No matching legacy target children found for "
+                f"{fs} on {server}.{RESET}"
+            )
     elif new_exists:
-        target_snapshot_root = new_root
+        target_snapshot_roots.append(new_root)
     else:
         print(
             f"{YELLOW}No legacy target tree found for {fs} on {server}; "
@@ -925,15 +983,20 @@ def migrate_legacy_backup(
     ):
         return False
 
-    if target_snapshot_root and not rename_legacy_snapshots(
-        settings,
-        target_snapshot_root,
-        zabselect,
-        source_hostname,
-        dry_run,
-        server=server,
-    ):
-        return False
+    # Never rename snapshots on the shared legacy root.  Only operate below
+    # children assigned to this host, or below its existing hostname tree.
+    if new_exists and new_root not in target_snapshot_roots:
+        target_snapshot_roots.append(new_root)
+    for target_snapshot_root in target_snapshot_roots:
+        if not rename_legacy_snapshots(
+            settings,
+            target_snapshot_root,
+            zabselect,
+            source_hostname,
+            dry_run,
+            server=server,
+        ):
+            return False
 
     return True
 
