@@ -105,6 +105,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "layout and rename unambiguous legacy snapshots"
         ),
     )
+    parser.add_argument(
+        "--unmount-migration-targets",
+        action="store_true",
+        help=(
+            "Unmount mounted remote backup filesystems when required by "
+            "--migrate-legacy; never forces an unmount"
+        ),
+    )
     return parser
 
 
@@ -420,8 +428,8 @@ def release_lock(lockfile_path: Path) -> None:
         )
         return
 
-    logging.info("Lock released, script completed.")
-    print(f"{GREEN}Lock released, script completed.{RESET}")
+    logging.info("Lock released.")
+    print(f"{GREEN}Lock released.{RESET}")
 
 
 def get_zfs_fs_list(settings: Settings) -> Dict[str, Dict[str, str]]:
@@ -710,6 +718,166 @@ def remote_dataset_exists(
     return result is not None and result.returncode == 0
 
 
+def list_remote_mounted_filesystems(
+    settings: Settings,
+    server: str,
+    root: str,
+) -> Optional[List[Tuple[str, str]]]:
+    """Return mounted filesystems at or below a remote dataset root.
+
+    None means the remote ZFS query itself failed.  Volumes are deliberately
+    excluded because they do not have filesystem mount state.
+    """
+    zfs_command = [
+        "zfs",
+        "list",
+        "-H",
+        "-r",
+        "-t",
+        "filesystem",
+        "-o",
+        "name,mounted,mountpoint",
+        root,
+    ]
+    result = run_subprocess(
+        [
+            "ssh",
+            server,
+            " ".join(shlex.quote(part) for part in zfs_command),
+        ],
+        timeout=settings.command_timeout_seconds,
+    )
+    if result is None or result.returncode != 0:
+        error = result.stderr.strip() if result else "remote zfs list did not run"
+        print(
+            f"{RED}Unable to check mount state below {server}:{root}: "
+            f"{error}{RESET}",
+            file=sys.stderr,
+        )
+        return None
+
+    mounted: List[Tuple[str, str]] = []
+    for line in result.stdout.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 3:
+            print(
+                f"{RED}Unexpected mount-state output from {server}: "
+                f"{line!r}{RESET}",
+                file=sys.stderr,
+            )
+            return None
+        name, is_mounted, mountpoint = fields
+        if is_mounted == "yes":
+            mounted.append((name, mountpoint))
+
+    return mounted
+
+
+def migration_mount_preflight(
+    settings: Settings,
+    server: str,
+    migrations: Sequence[Tuple[str, str]],
+    dry_run: bool,
+    unmount_migration_targets: bool,
+) -> bool:
+    """Verify migration trees are unmounted, optionally unmounting them."""
+    conflicts: List[Tuple[str, str]] = []
+    for old_child, _new_child in migrations:
+        mounted = list_remote_mounted_filesystems(settings, server, old_child)
+        if mounted is None:
+            return False
+        conflicts.extend(mounted)
+
+    if not conflicts:
+        return True
+
+    # A child and one of its descendants can both be mounted.  Unmount the
+    # deepest datasets first, and de-duplicate entries defensively.
+    conflicts = sorted(
+        set(conflicts),
+        key=lambda item: (item[0].count("/"), item[0]),
+        reverse=True,
+    )
+
+    if unmount_migration_targets:
+        mode = "TEST" if dry_run else "UNMOUNT"
+        for dataset, mountpoint in conflicts:
+            print(
+                f"{YELLOW}[{mode}] {server}:{dataset} "
+                f"mounted at {mountpoint}{RESET}"
+            )
+            if dry_run:
+                continue
+
+            zfs_command = ["zfs", "unmount", dataset]
+            result = run_subprocess(
+                [
+                    "ssh",
+                    server,
+                    " ".join(shlex.quote(part) for part in zfs_command),
+                ],
+                timeout=settings.command_timeout_seconds,
+            )
+            if result is None or result.returncode != 0:
+                error = (
+                    result.stderr.strip()
+                    if result is not None and result.stderr.strip()
+                    else "remote zfs unmount did not run successfully"
+                )
+                print(
+                    f"{RED}Unable to unmount {server}:{dataset}: "
+                    f"{error}{RESET}",
+                    file=sys.stderr,
+                )
+                return False
+
+        if dry_run:
+            print(
+                f"{GREEN}Dry run: the listed filesystems would be "
+                f"unmounted before migration.{RESET}"
+            )
+            return True
+
+        # Do not trust a successful command alone; verify every migration tree
+        # before creating parents or renaming datasets.
+        for old_child, _new_child in migrations:
+            remaining = list_remote_mounted_filesystems(
+                settings,
+                server,
+                old_child,
+            )
+            if remaining is None:
+                return False
+            if remaining:
+                print(
+                    f"{RED}Mount verification failed below "
+                    f"{server}:{old_child}:{RESET}",
+                    file=sys.stderr,
+                )
+                for dataset, mountpoint in remaining:
+                    print(
+                        f"  {dataset} mounted at {mountpoint}",
+                        file=sys.stderr,
+                    )
+                return False
+        return True
+
+    print(
+        f"{RED}Migration cannot proceed because target filesystems on "
+        f"{server} are mounted:{RESET}",
+        file=sys.stderr,
+    )
+    for dataset, mountpoint in conflicts:
+        print(f"  {dataset} mounted at {mountpoint}", file=sys.stderr)
+    print(
+        "Unmount the listed backup filesystems and rerun the migration. "
+        "Alternatively, add --unmount-migration-targets. "
+        "No migration changes were made.",
+        file=sys.stderr,
+    )
+    return False
+
+
 def relative_dataset_names(names: Sequence[str], root: str) -> Set[str]:
     """Convert a recursive dataset list to paths relative to its root."""
     relative: Set[str] = set()
@@ -799,6 +967,7 @@ def rename_legacy_snapshots(
 def migrate_legacy_backup(
     settings: Settings,
     dry_run: bool,
+    unmount_migration_targets: bool,
     fs: str,
     zabselect: str,
     server: str,
@@ -909,6 +1078,19 @@ def migrate_legacy_backup(
             )
 
         if migrations:
+            # A ZFS filesystem rename may need to unmount the filesystem and
+            # its descendants.  Never let migration implicitly disturb a
+            # mounted backup tree; detect every conflict before making the
+            # first change so the operation does not become partially applied.
+            if not migration_mount_preflight(
+                settings,
+                server,
+                migrations,
+                dry_run,
+                unmount_migration_targets,
+            ):
+                return False
+
             if not dry_run:
                 parent_result = run_subprocess(
                     [
@@ -938,6 +1120,25 @@ def migrate_legacy_backup(
                     f"{server}:{new_child}{RESET}"
                 )
                 if not dry_run:
+                    # Close the gap between the plan-wide preflight and this
+                    # rename in case something mounted the tree meanwhile.
+                    mounted = list_remote_mounted_filesystems(
+                        settings,
+                        server,
+                        old_child,
+                    )
+                    if mounted is None:
+                        return False
+                    if mounted:
+                        if not migration_mount_preflight(
+                            settings,
+                            server,
+                            [(old_child, new_child)],
+                            False,
+                            unmount_migration_targets,
+                        ):
+                            return False
+
                     rename_result = run_subprocess(
                         [
                             "ssh",
@@ -1004,6 +1205,7 @@ def migrate_legacy_backup(
 def run_backup(
     settings: Settings,
     dry_run: bool,
+    unmount_migration_targets: bool,
     fs: str,
     zabselect: str,
     server: str,
@@ -1021,6 +1223,7 @@ def run_backup(
     if migrate_legacy and not migrate_legacy_backup(
         settings,
         dry_run,
+        unmount_migration_targets,
         fs,
         zabselect,
         server,
@@ -1154,6 +1357,7 @@ def zabwrap(
     limit: Optional[Sequence[str]],
     debug: bool,
     migrate_legacy: bool,
+    unmount_migration_targets: bool,
 ) -> bool:
     filesystems = list(limit) if limit else list(get_zfs_fs_list(settings))
     all_succeeded = True
@@ -1278,6 +1482,7 @@ def zabwrap(
             if not run_backup(
                 settings,
                 dry_run,
+                unmount_migration_targets,
                 fs,
                 zabselect,
                 server,
@@ -1294,6 +1499,11 @@ def zabwrap(
 def main() -> int:
     parser = build_argument_parser()
     args = parser.parse_args()
+
+    if args.unmount_migration_targets and not args.migrate_legacy:
+        parser.error(
+            "--unmount-migration-targets requires --migrate-legacy"
+        )
 
     try:
         settings = load_settings(args.config, args.config_dir)
@@ -1325,6 +1535,7 @@ def main() -> int:
             args.limit,
             args.debug,
             args.migrate_legacy,
+            args.unmount_migration_targets,
         )
         return 0 if succeeded else 1
     except RuntimeError as exc:
